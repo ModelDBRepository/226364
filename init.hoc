@@ -1,0 +1,8 @@
+load_file("nrngui.hoc")
+xpanel("Kim J et al. 2017")
+  xlabel("Select a simulation")
+  xbutton("Before learning","{xopen(\"Before_learning.hoc\")}")
+  xbutton("After learning","{xopen(\"After_learning.hoc\")}")
+  xlabel("Quit and restart in-between simulations")
+  xbutton("Quit","quit()")
+xpanel()

@@ -1,0 +1,265 @@
+/*---------------------------------------------------------------------------------
+Simulations of a single-compartment model of Kim and Fiorillo, Nat. Commun., 2017.
+---------------------------------------------------------------------------------*/
+print "----------------------------------------------"
+print "   Single-compartment generic neuron model"
+print "   Kim and Fiorillo, Nat. Commun., 2017"
+print "----------------------------------------------"
+
+//----------------------------------------------------------------------------
+//  Loading and defining general graphical procedures
+//----------------------------------------------------------------------------
+load_file("nrngui.hoc")		// updated command version of above
+load_file("stdgui.hoc")
+cvode.active(0)
+
+objectvar g[20], b[20]			// max 20 graphs
+strdef gvar
+ngraph = 0
+
+proc addgraph() { local ii	// define subroutine to add a new graph
+				// addgraph("variable", minvalue, maxvalue)
+	ngraph = ngraph+1
+	ii = ngraph-1
+
+	b[ii] = new VBox()
+	b[ii].intercept(1)
+
+	g[ii] = new Graph()
+	g[ii].size(0,tstop,$1,$2)
+	g[ii].xaxis()
+	g[ii].yaxis()
+	g[ii].addvar($s4,1,0)
+	if($3>1) g[ii].addvar($s5,2,0)
+	if($3>2) g[ii].addvar($s6,3,0)
+	if($3>3) g[ii].addvar($s7,4,0)
+	g[ii].save_name("graphList[0].")
+	graphList[0].append(g[ii])
+
+	b[ii].intercept(0)
+	b[ii].map("  ",500+400*ii,430,300,200) // graph box location
+
+	g[ii].exec_menu("Keep Lines")
+}
+
+
+
+//----------------------------------------------------------------------------
+//----------------------------------------------------------------------------
+//  setup simulation parameters at the final state after learning
+//----------------------------------------------------------------------------
+//----------------------------------------------------------------------------
+objref pc
+pc=new ParallelContext()
+
+mean_IEI=1000/50	// 1 s / 50 Hz
+GL=10			// nS, passive (leakage) conductance
+EL=-70			// mV, reversal potential of passive (leakage) conductance
+I_E=1.7			// the ratio of IPSG amplitude to EPSG amplitude
+I_tau=4.7		// ms, IPSG decay time constant
+
+dt = 0.1
+tstart = 0
+tstop = 1.5*1e3
+
+celsius = 35			// temperature
+v_init = EL			// resting Vm
+
+//----------------------------------------------------------------------------
+//  Creating single-compartment geometry and inserting conductances
+//----------------------------------------------------------------------------
+//////////////////////////////single-compartment geometry //////////////////////////////
+xopen("tc1.geo")		// read geometry file
+
+t_area=0
+forall for(x,0) t_area = t_area + area(x)
+Tm=(t_area*104.9)*1e-5 // (um2 x uF/cm2*1e-5 = nF) x (Mohm)  = ms
+Cm=(t_area*1e-5) // nF
+//print "total area = ", t_area,"um2 Tm = ", Tm ,"ms Cm = ", Cm ,"nF"
+
+/////////////////Passive conductance everywhere////////////////
+forall { 
+	insert pas
+	g_pas = 4.16e-5*0.1 *GL	
+	e_pas = EL
+	cm = 1
+	Ra = 173
+}
+
+/////////////////Fast spikes to soma////////////////
+soma {	
+	insert hh2		
+	ena = 50
+	ek = -90
+	vtraub_hh2 = -56.8
+	gnabar_hh2 = 0.10
+	gkbar_hh2 = 0.10 
+}
+
+/////////////////Excitatory postsynaptic conductance (EPSG)////////////////
+nsyn=1
+Asynch=1
+nampa=nsyn*Asynch
+
+E_onset = 0	// ms
+
+objref s[nampa], rsyn[nampa], nc[nampa]
+double ge_th[nampa]
+
+i=0
+soma  {
+	distance(0,.5)
+	for j=0,Asynch-1 {
+
+		ge_th[i+nsyn*j]=30 *1e-3	//uS, unitary amplitude of EPSG and IPSG
+
+		s[i+nsyn*j] = new NetStims(0.5)
+		s[i+nsyn*j].interval=dt
+		if (j==0) s[i+nsyn*j].number = 1e9
+		if (j!=0) s[i+nsyn*j].number = 1
+		s[i+nsyn*j].start=E_onset
+		s[i+nsyn*j].noise=0
+		s[i+nsyn*j].seed(987651119)
+		rsyn[i+nsyn*j] = new Exp2Syn(0.5)
+		rate=1.5
+		rsyn[i+nsyn*j].tau1 = 0.3*rate
+		rsyn[i+nsyn*j].tau2 = 2*rate
+		rsyn[i+nsyn*j].e=0
+		nc[i+nsyn*j] = new NetCon(s[i+nsyn*j],rsyn[i+nsyn*j],0,0,0) 
+	}
+}
+
+/////////////////Inhibitory postsynaptic conductance (IPSG)////////////////
+Idel=1.0	// IPSG delay from EPSG onset
+ngaba=nampa
+objectvar s_Ga[ngaba], rsyn_Ga[ngaba], nc_Ga[ngaba]
+
+i=0
+soma  {
+
+	for j=0,Asynch-1	{
+		s_Ga[i+nsyn*j] = new NetStims(0.5)
+		s_Ga[i+nsyn*j].interval=dt
+		if (j==0) s_Ga[i+nsyn*j].number = 1e9
+		if (j!=0) s_Ga[i+nsyn*j].number = 1
+		s_Ga[i+nsyn*j].start=E_onset//+Idel
+		s_Ga[i+nsyn*j].noise=0
+		s_Ga[i+nsyn*j].seed(987651119)
+		rsyn_Ga[i+nsyn*j] = new Exp2Syn(0.5)
+		rsyn_Ga[i+nsyn*j].tau1 = 0.9
+		rsyn_Ga[i+nsyn*j].tau2 = I_tau
+		rsyn_Ga[i+nsyn*j].e=-70
+		nc_Ga[i+nsyn*j] = new NetCon(s_Ga[i+nsyn*j],rsyn_Ga[i+nsyn*j],0,0,0)
+		}
+}
+
+//----------------------------------------------------------------------------
+//  Inter-EPSG inverval - Random Pattern
+//----------------------------------------------------------------------------
+objref IEIs_Pssn, f, E_On, I_On, E_On_t
+strdef fname
+
+sprint(fname, "IEIs_%dHz.tmp",1000/mean_IEI)
+IEIs_Pssn = new Vector()
+f= new File()
+f.ropen(fname)
+IEIs_Pssn.vread(f)
+
+func round(){
+	temp_int = int($1)
+	if ($1-temp_int<0.5) return temp_int
+	if ($1-temp_int>=0.5) return temp_int+1
+}
+
+D100=21
+Pttrn_time=1000000
+E_On_iter=0
+proc E_On_gen(){
+E_On=new Vector(Pttrn_time/dt) // 10s / dt = 40000
+I_On=new Vector(Pttrn_time/dt)
+
+if(E_On_iter==0) {E_On_next=0
+		  I_On_next=1
+		  E_On_t=new Vector()
+		  E_On_i=0
+		  IP_i=0+D100 }
+if(E_On_iter!=0) {	E_On_next=E_On_next - E_On.size()*dt
+			E_On_i=E_On_next/dt
+			if (E_On_i<=E_On.size()-1) E_On.x[E_On_i]=1
+			I_On_next=I_On_next - I_On.size()*dt
+			I_On_i=I_On_next/dt
+			if (I_On_i<=I_On.size()-1) I_On.x[I_On_i]=1	} 
+while (E_On_i<E_On.size()){
+	IEI = round(IEIs_Pssn.x[IP_i]/dt) * dt
+	if(mean_IEI==10/2 && IP_i==15+D100) IEI=5
+	if(mean_IEI==10/2 && IP_i==16+D100) IEI=4
+	if(mean_IEI==10/2 && IP_i==17+D100) IEI=7
+	if(mean_IEI==10/2 && IP_i==24+D100) IEI=3
+	IP_i += 1
+	E_On_next = E_On_next + IEI
+	E_On_t.append(E_On_next)
+	E_On_i=E_On_next/dt
+	if (E_On_i<=E_On.size()-1) {	E_On.x[E_On_i]=1
+					E_On.x[E_On_i+1]=0
+					E_On.x[E_On_i+2]=0	}
+	I_On_next = I_On_next + IEI
+	I_On_i=I_On_next/dt
+	if (I_On_i<=I_On.size()-1) {	I_On.x[I_On_i]=1
+					I_On.x[I_On_i+1]=0
+					I_On.x[I_On_i+2]=0	}
+}
+E_On_iter+=1
+}
+//E_On_gen()
+
+//----------------------------------------------------------------------------
+//  Adding graphs
+//----------------------------------------------------------------------------
+addgraph(-80,40,1,"soma.v(0.5)")	// Voltage at soma
+g[0].size(0, 150, -70, 30)
+EPSG=0
+IPSG=0
+addgraph(0,0.05,2,"EPSG","IPSG")	// EPSG & IPSG
+g[1].size(0, 150, 0, 0.1)
+
+//----------------------------------------------------------------------------
+//  Simulation, run
+//----------------------------------------------------------------------------
+N_E_2C=10000
+syn_event_i=0
+proc m_run(){
+	init()
+	if (t==0) print "Simulation for 50 Hz of EPSG after IPSG learning"
+
+	E_On_iter=0
+	while(t<tstop) { 
+		if (t/Pttrn_time - int(t/Pttrn_time) == 0) E_On_gen()
+		if(t==0) E_On_last=E_On_t.x[N_E_2C]+dt*2
+		t_i=t/dt - Pttrn_time/dt*(E_On_iter-1)
+		nc[0].weight=0
+		nc_Ga[0].weight=0
+		if (t<=E_On_last-dt*2) 	 nc[0].weight=ge_th[0]*E_On.x[t_i]		
+		if (t<=E_On_last+Idel-dt*2)	nc_Ga[0].weight=ge_th[0]*I_E*I_On.x[t_i]
+
+		fadvance()
+		
+		EPSG=0
+		IPSG=0
+		for i=0,Asynch-1 {	EPSG+=rsyn[i].g// uS
+					IPSG+=rsyn_Ga[i].g	}
+
+		for i=0,ngraph-1 g[i].plot(t)
+	}
+	for i=0,ngraph-1 g[i].flush()
+	doNotify()
+syn_event_i += 1
+}
+
+init()	
+
+itime=pc.time
+
+m_run() ////////////////////////////manual run
+
+print "Elapsed time : ", pc.time-itime
+
